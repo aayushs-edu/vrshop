@@ -21,3 +21,7 @@ unity/*.csproj
 unity/*.sln
 unity/*.slnx
 unity/.utmp/
+
+# Meta XR DevAgent settings hold a local access token
+unity/Assets/Resources/DevAgentSettings.asset
+unity/Assets/Resources/DevAgentSettings.asset.meta
