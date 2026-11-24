@@ -4,6 +4,28 @@ Scan your room with your phone → AI understands it and finds **real furniture 
 put on a **Meta Quest 2** and place **true-scale 3D models** of those exact products in your actual room,
 walk around them, check they fit, let AI arrange the room, and check out with store links on your phone.
 
+## AI-safety validation suite
+
+The shopping agent can spend real money, so this repo adds a fast test suite that tries to make it misbehave:
+**[`backend/SECURITY_TESTS.md`](backend/SECURITY_TESTS.md)** (results and write-up) and
+**[`backend/test/security.test.ts`](backend/test/security.test.ts)** (32 tests, under a second, offline).
+
+```bash
+cd backend && npm install && npm run test:security
+```
+
+- **Spending limits:** the shopper's mandate (total cap, per-store caps, allowed stores, expiry) rejects every
+  out-of-bounds order, and an over-budget cart needs explicit approval.
+- **Authorization:** retailers reject unsigned, tampered, replayed or re-targeted agent orders (Visa Trusted Agent
+  Protocol, Ed25519 / RFC 9421).
+- **Prompt injection:** 8 attacks, including instructions hidden in product titles, store names and chat history,
+  must not trigger checkout. An opt-in mode (`RUN_LLM_EVALS=1`) runs them against the live model.
+- **Defense in depth:** even a fooled assistant can't spend past the budget.
+
+The suite found two real gaps, and both are fixed: checkout amounts weren't covered by the agent's signature (now the
+whole order body is signed with an RFC 9530 Content-Digest), and the offline assistant could be talked into checkout
+by "ignore previous instructions…" phrasing.
+
 ```
  iPhone (Safari)                    Backend (Node, your laptop)                          Quest 2 (Unity app)
  ───────────────                    ───────────────────────────                          ───────────────────
@@ -25,6 +47,7 @@ walk around them, check they fit, let AI arrange the room, and check out with st
 | [`backend/`](backend) | Node/TypeScript API: room analysis, product search, 3D model pipeline, layout solver, voice, image proxy. Also serves the phone web app. |
 | [`backend/public/`](backend/public) | **Optional** phone companion web app: photograph your room so the AI can read its style, and review the cart. The headset works without it: with no scan yet it starts from a sample living room, and everything else (browsing, the talking designer, placing, checkout) happens in the headset. |
 | [`unity/`](unity) | Quest 2 app for Unity 6000.3.13f1 — see [`unity/README.md`](unity/README.md) for the step-by-step setup. |
+| [`backend/SECURITY_TESTS.md`](backend/SECURITY_TESTS.md) | **AI-safety validation suite:** spending limits, agent authorization, prompt injection, defense in depth. Results and fixes. |
 | [`docs/VISA.md`](docs/VISA.md) | **Visa track:** AI agent checkout ("buy the room") on Visa Acceptance + Trusted Agent Protocol, mandates, budget coach, tamper demo, setup and demo script. |
 | [`docs/PLAN.md`](docs/PLAN.md) | The full plan: architecture decisions, research, 3-day schedule, demo script, LiDAR upgrade path. |
 
