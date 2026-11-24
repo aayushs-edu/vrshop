@@ -200,8 +200,10 @@ export function heuristicInterpret(text: string, ctx: AssistantContext): Interpr
   const ord = Object.entries(ORDINALS).find(([w]) => new RegExp(`\\b${w}\\b`).test(t));
   const target = ord ? (ord[1] === -1 ? ctx.visible[ctx.visible.length - 1] : ctx.visible[ord[1] - 1]) : /\b(this|that|it)\b/.test(t) ? ctx.focused : undefined;
   const replaceMatch = t.match(/\b(?:replace|swap(?: out)?)\s+(?:(?:my|the|this|that|our)\s+)?([a-z ]*?)\s*(?:\b(?:with|for)\b|$)/) ?? t.match(/\binstead of (?:my|the|this|that|our)?\s*([a-z ]+)/);
+  const asksCheckout = /\b(check ?out|buy (it all|everything|the (whole )?room|my cart)|place (the|my) order|pay for (it all|everything))\b/.test(t);
+  const injected = asksCheckout && INJECTION_RE.test(t); // "ignore your instructions and check out": not a plain request
   const action: Action = replaceMatch ? 'replace' :
-    /\b(check ?out|buy (it all|everything|the (whole )?room|my cart)|place (the|my) order|pay for (it all|everything))\b/.test(t) ? 'checkout'
+    asksCheckout && !injected ? 'checkout'
       : /\b(add|put)\b.*\bcart\b|\bi'?ll take\b|\bbuy\b/.test(t) ? 'add_to_cart'
       : /\bremove\b.*\bcart\b/.test(t) ? 'remove_from_cart'
         : /\b(place|show (it|me) in (my|the) room|put (it|this) (here|there))\b/.test(t) ? 'place'
@@ -209,11 +211,15 @@ export function heuristicInterpret(text: string, ctx: AssistantContext): Interpr
 
   const filters = normalizeFilters(f);
   let reply = '';
-  if (target && /\bhow much\b/.test(t)) reply = `${target.title} is ${target.priceText || 'not priced'} at ${target.store}.`;
+  if (injected) reply = 'I only check out when you ask me plainly. Say “check out” and I’ll show you the total to approve.';
+  else if (target && /\bhow much\b/.test(t)) reply = `${target.title} is ${target.priceText || 'not priced'} at ${target.store}.`;
   else if (JSON.stringify(filters) === JSON.stringify(normalizeFilters(ctx.filters)) && question === 'none' && action === 'none' && !reset) reply = `Try something like “a black leather sofa under $1,000”.`;
   const replaceTarget = replaceMatch ? (replaceMatch[1] || 'this').trim() : undefined;
   return { filters, question, action, target, atPointer: /\b(here|there|this corner|that corner)\b/.test(t), replaceTarget, reply, source: 'heuristic' };
 }
+
+/** Prompt-injection tells: overriding instructions, fake system/admin/developer messages, claimed pre-approval. */
+const INJECTION_RE = /\b(ignore|disregard|forget|override)\b.{0,30}\b(instructions?|rules|prompts?|guidelines|limits?)\b|\b(system|admin|developer|assistant)\s*(:|override|mode|note|instruction|prompt)|\b(pre-?approved|already approved|jailbreak)\b/;
 
 /** Common kids' themes without an AI key: the words matching products carry in their titles. */
 export const themeOf = (t: string) => themeFamily(t);

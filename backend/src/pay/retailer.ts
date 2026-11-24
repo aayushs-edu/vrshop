@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import type { IncomingMessage } from 'node:http';
 import express from 'express';
 import { authorize } from './acceptance.js';
 import { checkMandate, findMandate, storeSlug } from './mandate.js';
@@ -36,6 +37,9 @@ export interface RetailerResponse {
 // The merchant's view of the key directory. A real merchant would fetch and cache the agent's JWKS by keyid.
 const resolveKey = (kid: string) => keyDirectory().keys.find((k) => k.kid === kid);
 
+/** express.json `verify` hook: keep the raw body bytes so the retailer can check them against the signed Content-Digest. */
+export const keepRawBody = (req: IncomingMessage, _res: unknown, buf: Buffer) => { (req as IncomingMessage & { rawBody?: Buffer }).rawBody = buf; };
+
 export const retailerRouter = express.Router();
 
 retailerRouter.post('/:store/checkout', async (req, res) => {
@@ -45,8 +49,11 @@ retailerRouter.post('/:store/checkout', async (req, res) => {
   const store = body?.store ?? String(req.params.store);
 
   const v = verifyRequest(
-    { authority: String(req.headers.host ?? ''), path: req.baseUrl + req.path, signatureInput: req.header('signature-input'), signature: req.header('signature') },
-    { expectTag: TAG_PAY, resolveKey },
+    {
+      authority: String(req.headers.host ?? ''), path: req.baseUrl + req.path, signatureInput: req.header('signature-input'), signature: req.header('signature'),
+      contentDigest: req.header('content-digest'), body: (req as { rawBody?: Buffer }).rawBody,
+    },
+    { expectTag: TAG_PAY, resolveKey, requireDigest: true },
   );
   step(v.ok ? 'Verified the agent’s Visa TAP signature' : 'Rejected: agent signature check failed', v.ok, v.ok ? `Ed25519 · key ${v.keyId?.slice(0, 10)}… · tag ${v.tag}` : v.reason);
   if (!v.ok) return void res.status(401).json({ ok: false, reason: v.reason, steps, tap: { verified: false, ...v } } satisfies RetailerResponse);

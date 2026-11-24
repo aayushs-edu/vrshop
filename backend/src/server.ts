@@ -11,7 +11,7 @@ import { pullCatalog, pullStatus, planShoppingQueries, type PullTier } from './i
 import { liveSearchBudgetLeft, shoppingCallsThisMonth } from './inventory/usage.js';
 import { COLORS, MATERIALS, STYLES } from './inventory/attributes.js';
 import { CATEGORIES, normalizeCategory } from './catalog.js';
-import { retailerRouter } from './pay/retailer.js';
+import { keepRawBody, retailerRouter } from './pay/retailer.js';
 import { splitWithRoommate, startCheckout, tamperDemo, TAMPER_MODES, voidOrder, type TamperMode } from './pay/agent.js';
 import { findMandate, vicInstruction } from './pay/mandate.js';
 import { buildQuote } from './pay/quote.js';
@@ -30,7 +30,7 @@ import type { Placement, RoomGeometry } from './types.js';
 
 const app = express();
 app.disable('x-powered-by');
-app.use(express.json({ limit: '5mb' }));
+app.use(express.json({ limit: '5mb', verify: keepRawBody }));
 app.use((req, res, next) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');

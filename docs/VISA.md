@@ -27,7 +27,8 @@ Protocol, capped by a spending mandate, and authorized through Visa Acceptance.
 
 How TAP is used:
 - The agent signs every checkout request with **Ed25519 RFC 9421 HTTP message signatures**:
-  - covers `@authority` and `@path`;
+  - covers `@authority`, `@path` and the order body's RFC 9530 `Content-Digest` (so the amount and items can't be
+    changed after signing; the retailer rejects pay requests whose signature doesn't cover the body);
   - an 8-minute window;
   - a single-use nonce;
   - the tag `agent-payer-auth`.

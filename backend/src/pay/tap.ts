@@ -49,19 +49,28 @@ export interface SignedHeaders { 'Signature-Input': string; Signature: string }
 export interface SignParams { created: number; expires: number; keyid: string; nonce: string; tag: string }
 
 const COMPONENTS = ['@authority', '@path'] as const;
+// Requests with a body (checkout orders) also cover its RFC 9530 Content-Digest, so the amount and items can't be
+// changed after signing. TAP's example covers only @authority and @path; RFC 9421 lets a signer cover more.
+const DIGEST = 'content-digest';
+
+/** RFC 9530 Content-Digest header value for a request body. */
+export const contentDigest = (body: string | Buffer) => `sha-256=:${crypto.createHash('sha256').update(body).digest('base64')}:`;
 
 // Parameter order and spelling follow the TAP spec's example (developer.visa.com TAP specifications).
-function paramsString(p: SignParams): string {
-  return `(${COMPONENTS.map((c) => `"${c}"`).join(' ')});created=${p.created};keyid="${p.keyid}";alg="Ed25519";expires=${p.expires};nonce="${p.nonce}";tag="${p.tag}"`;
+function paramsString(p: SignParams, components: readonly string[]): string {
+  return `(${components.map((c) => `"${c}"`).join(' ')});created=${p.created};keyid="${p.keyid}";alg="Ed25519";expires=${p.expires};nonce="${p.nonce}";tag="${p.tag}"`;
 }
 
-/** RFC 9421 signature base over @authority and @path. */
-export function signatureBase(authority: string, pathname: string, params: string): string {
-  return `"@authority": ${authority.toLowerCase()}\n"@path": ${pathname}\n"@signature-params": ${params}`;
+interface Covered { authority: string; path: string; contentDigest?: string }
+
+/** RFC 9421 signature base over the covered components (@authority, @path, optionally content-digest). */
+export function signatureBase(components: readonly string[], v: Covered, params: string): string {
+  const value = (c: string) => (c === '@authority' ? v.authority.toLowerCase() : c === '@path' ? v.path : v.contentDigest);
+  return [...components.map((c) => `"${c}": ${value(c)}`), `"@signature-params": ${params}`].join('\n');
 }
 
-/** Sign a request URL for a merchant. `overrides` exist only for the tamper demo. */
-export function signRequest(url: string, tag: string, overrides: Partial<SignParams> & { authority?: string; path?: string } = {}): SignedHeaders & { params: SignParams; base: string } {
+/** Sign a request URL (and its body, if any) for a merchant. `overrides` other than `nonce` exist only for the tamper demo. */
+export function signRequest(url: string, tag: string, overrides: Partial<SignParams> & { authority?: string; path?: string } = {}, body?: string): SignedHeaders & { 'Content-Digest'?: string; params: SignParams; base: string } {
   const u = new URL(url);
   const key = agentKey();
   const now = Math.floor(Date.now() / 1000);
@@ -72,11 +81,16 @@ export function signRequest(url: string, tag: string, overrides: Partial<SignPar
     nonce: overrides.nonce ?? crypto.randomBytes(32).toString('base64'),
     tag: overrides.tag ?? tag,
   };
-  const ps = paramsString(params);
-  const base = signatureBase(overrides.authority ?? u.host, overrides.path ?? u.pathname, ps);
+  const digest = body === undefined ? undefined : contentDigest(body);
+  const components = digest ? [...COMPONENTS, DIGEST] : COMPONENTS;
+  const ps = paramsString(params, components);
+  const base = signatureBase(components, { authority: overrides.authority ?? u.host, path: overrides.path ?? u.pathname, contentDigest: digest }, ps);
   const sig = crypto.sign(null, Buffer.from(base, 'utf8'), key.privateKey).toString('base64');
-  return { 'Signature-Input': `sig1=${ps}`, Signature: `sig1=:${sig}:`, params, base };
+  return { 'Signature-Input': `sig1=${ps}`, Signature: `sig1=:${sig}:`, ...(digest ? { 'Content-Digest': digest } : {}), params, base };
 }
+
+/** A fresh TAP nonce. Pick it before building a signed body, since the payment container in the body carries it. */
+export const newNonce = () => crypto.randomBytes(32).toString('base64');
 
 // ------------------------------------------------------------------------------------------ payment container
 
@@ -128,11 +142,12 @@ export interface VerifyResult { ok: boolean; reason?: string; keyId?: string; no
 
 /**
  * Merchant-side verification. `resolveKey` plays the role of the TAP key directory lookup.
- * Checks, in order: header shape, covered components, tag, window, known key, signature, nonce replay.
+ * Checks, in order: header shape, covered components, body digest, tag, window, known key, signature, nonce replay.
+ * With `requireDigest`, the signature must also cover a Content-Digest that matches the raw body bytes.
  */
 export function verifyRequest(
-  req: { authority: string; path: string; signatureInput?: string; signature?: string },
-  opts: { expectTag: string; resolveKey: (kid: string) => JsonWebKey | undefined },
+  req: { authority: string; path: string; signatureInput?: string; signature?: string; contentDigest?: string; body?: Buffer },
+  opts: { expectTag: string; resolveKey: (kid: string) => JsonWebKey | undefined; requireDigest?: boolean },
 ): VerifyResult {
   if (!req.signatureInput || !req.signature) return { ok: false, reason: 'Missing Signature-Input / Signature headers (not a trusted agent)' };
   const inp = parseInput(req.signatureInput);
@@ -140,6 +155,12 @@ export function verifyRequest(
   const { params, components } = inp;
   const base = { keyId: params.keyid, nonce: params.nonce, tag: params.tag };
   if (!COMPONENTS.every((c) => components.includes(c))) return { ...base, ok: false, reason: 'Signature must cover @authority and @path' };
+  if (components.some((c) => c !== DIGEST && !(COMPONENTS as readonly string[]).includes(c))) return { ...base, ok: false, reason: 'Signature covers an unsupported component' };
+  if (opts.requireDigest && !components.includes(DIGEST)) return { ...base, ok: false, reason: 'Signature must cover the order body (Content-Digest)' };
+  if (components.includes(DIGEST)) {
+    if (!req.contentDigest || !req.body) return { ...base, ok: false, reason: 'Missing Content-Digest header or body' };
+    if (req.contentDigest !== contentDigest(req.body)) return { ...base, ok: false, reason: 'Order body doesn’t match its Content-Digest (changed after signing)' };
+  }
   if (params.tag !== opts.expectTag) return { ...base, ok: false, reason: `Wrong tag "${params.tag}": this endpoint needs "${opts.expectTag}"` };
   const now = Math.floor(Date.now() / 1000);
   const created = Number(params.created), expires = Number(params.expires);
@@ -150,7 +171,7 @@ export function verifyRequest(
   if (!jwk) return { ...base, ok: false, reason: `Unknown agent key "${String(params.keyid).slice(0, 12)}…" (not in the key directory)` };
   const sigM = req.signature.match(new RegExp(`${inp.label}=:([^:]+):`));
   if (!sigM) return { ...base, ok: false, reason: `No signature labelled "${inp.label}"` };
-  const signed = signatureBase(req.authority, req.path, inp.raw);
+  const signed = signatureBase(components, { authority: req.authority, path: req.path, contentDigest: req.contentDigest }, inp.raw);
   let valid = false;
   try { valid = crypto.verify(null, Buffer.from(signed, 'utf8'), crypto.createPublicKey({ key: jwk, format: 'jwk' }), Buffer.from(sigM[1], 'base64')); } catch { valid = false; }
   if (!valid) return { ...base, ok: false, reason: 'Signature does not verify for this merchant and path (tampered, or signed for someone else)' };

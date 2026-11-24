@@ -6,7 +6,7 @@ import { sleep } from '../util/http.js';
 import { createPaymentLink, reverse } from './acceptance.js';
 import { checkMandate, newMandateId, registerEphemeral, storeSlug } from './mandate.js';
 import { buildQuote } from './quote.js';
-import { paymentContainer, signRequest, TAG_BROWSE, TAG_PAY } from './tap.js';
+import { newNonce, paymentContainer, signRequest, TAG_BROWSE, TAG_PAY } from './tap.js';
 import { visaStatus } from './visa.js';
 import type { RetailerOrder, RetailerResponse } from './retailer.js';
 import type { Checkout, Mandate, Order, OrderStep } from '../types.js';
@@ -90,18 +90,21 @@ async function runAgent(sessionId: string) {
     await sleep(STEP_DELAY_MS);
 
     const url = `${retailerBase()}/${storeSlug(order.store)}/checkout`;
-    const signed = signRequest(url, TAG_PAY);
-    addStep(sessionId, order.id, { label: 'Agent signed the checkout with Visa Trusted Agent Protocol', ok: true, detail: `Ed25519 · RFC 9421 · ${new URL(url).host}${new URL(url).pathname} · valid ${Math.round((signed.params.expires - signed.params.created) / 60)} min` });
+    // The payment container carries the signature's nonce, and the signature covers the body: nonce, then body, then sign.
+    const nonce = newNonce();
+    const payload: RetailerOrder = {
+      mandateId: c.mandate.id, orderId: order.id, store: order.store, amount: order.amount, currency: order.currency, items: order.items,
+      agenticPaymentContainer: paymentContainer(nonce, c.mandate.card.last4, c.mandate.id),
+    };
+    const body = JSON.stringify(payload);
+    const signed = signRequest(url, TAG_PAY, { nonce }, body);
+    addStep(sessionId, order.id, { label: 'Agent signed the checkout with Visa Trusted Agent Protocol', ok: true, detail: `Ed25519 · RFC 9421 · ${new URL(url).host}${new URL(url).pathname} + order body · valid ${Math.round((signed.params.expires - signed.params.created) / 60)} min` });
     update(sessionId, (cc) => { cc.orders.find((o) => o.id === order.id)!.tap = { keyId: signed.params.keyid, nonce: signed.params.nonce, tag: signed.params.tag, verified: false }; });
     await sleep(STEP_DELAY_MS);
 
-    const payload: RetailerOrder = {
-      mandateId: c.mandate.id, orderId: order.id, store: order.store, amount: order.amount, currency: order.currency, items: order.items,
-      agenticPaymentContainer: paymentContainer(signed.params.nonce, c.mandate.card.last4, c.mandate.id),
-    };
     let r: RetailerResponse;
     try {
-      const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Signature-Input': signed['Signature-Input'], Signature: signed.Signature }, body: JSON.stringify(payload) });
+      const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Signature-Input': signed['Signature-Input'], Signature: signed.Signature, 'Content-Digest': signed['Content-Digest']! }, body });
       r = (await res.json()) as RetailerResponse;
     } catch (e) {
       r = { ok: false, reason: `Retailer unreachable: ${errMsg(e)}`, steps: [], tap: { verified: false } };
@@ -191,23 +194,25 @@ export async function tamperDemo(mode: TamperMode): Promise<{ mode: TamperMode; 
   const amount = mode === 'over_mandate' ? 899 : 249;
   const url = `${retailerBase()}/${storeSlug(store)}/checkout`;
   const now = Math.floor(Date.now() / 1000);
-  const signed =
-    mode === 'expired' ? signRequest(url, TAG_PAY, { created: now - 900, expires: now - 420 })
-      : mode === 'wrong_merchant' ? signRequest(url, TAG_PAY, { path: '/retailer/another-store/checkout' })
-        : mode === 'unknown_key' ? signRequest(url, TAG_PAY, { keyid: crypto.randomBytes(32).toString('base64url') })
-          : mode === 'wrong_tag' ? signRequest(url, TAG_BROWSE)
-            : signRequest(url, TAG_PAY);
+  const nonce = newNonce();
   const payload: RetailerOrder = {
     mandateId: mandate.id, orderId: `demo_${mode}`, store, amount, currency: 'USD', items: [{ productId: 'demo', title: 'Demo armchair', qty: 1, unitPrice: amount }], dryRun: true,
     // A container lifted from another request (different nonce) is rejected too.
-    agenticPaymentContainer: paymentContainer(mode === 'stolen_container' ? crypto.randomBytes(32).toString('base64') : signed.params.nonce, mandate.card.last4, mandate.id),
+    agenticPaymentContainer: paymentContainer(mode === 'stolen_container' ? newNonce() : nonce, mandate.card.last4, mandate.id),
   };
+  const body = JSON.stringify(payload);
+  const signed =
+    mode === 'expired' ? signRequest(url, TAG_PAY, { nonce, created: now - 900, expires: now - 420 }, body)
+      : mode === 'wrong_merchant' ? signRequest(url, TAG_PAY, { nonce, path: '/retailer/another-store/checkout' }, body)
+        : mode === 'unknown_key' ? signRequest(url, TAG_PAY, { nonce, keyid: crypto.randomBytes(32).toString('base64url') }, body)
+          : mode === 'wrong_tag' ? signRequest(url, TAG_BROWSE, { nonce }, body)
+            : signRequest(url, TAG_PAY, { nonce }, body);
   let sig = signed.Signature;
   if (mode === 'signature') sig = sig.replace(/:(.)/, (_m, ch: string) => `:${ch === 'A' ? 'B' : 'A'}`);
   const send = async () => {
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-    if (mode !== 'unsigned') { headers['Signature-Input'] = signed['Signature-Input']; headers.Signature = sig; }
-    const res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(payload) });
+    if (mode !== 'unsigned') { headers['Signature-Input'] = signed['Signature-Input']; headers.Signature = sig; headers['Content-Digest'] = signed['Content-Digest']!; }
+    const res = await fetch(url, { method: 'POST', headers, body });
     return (await res.json()) as RetailerResponse;
   };
   let r = await send();
