@@ -16,8 +16,8 @@ cd backend && npm install && npm run test:security
 
 - **Spending limits:** the shopper's mandate (total cap, per-store caps, allowed stores, expiry) rejects every
   out-of-bounds order, and an over-budget cart needs explicit approval.
-- **Authorization:** retailers reject unsigned, tampered, replayed or re-targeted agent orders (Visa Trusted Agent
-  Protocol, Ed25519 / RFC 9421).
+- **Authorization:** retailers reject unsigned agent orders, tampered signatures, orders edited after signing, and
+  unknown mandates (Visa Trusted Agent Protocol, Ed25519 / RFC 9421).
 - **Prompt injection:** 8 attacks, including instructions hidden in product titles, store names and chat history,
   must not trigger checkout. An opt-in mode (`RUN_LLM_EVALS=1`) runs them against the live model.
 - **Defense in depth:** even a fooled assistant can't spend past the budget.
